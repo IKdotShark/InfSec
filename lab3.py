@@ -79,7 +79,8 @@ def init_db():
             phonenumber TEXT,
             is_admin BOOLEAN DEFAULT FALSE NOT NULL,
             is_blocked BOOLEAN DEFAULT FALSE NOT NULL,
-            failed_attempts INTEGER DEFAULT 0 NOT NULL
+            failed_attempts INTEGER DEFAULT 0 NOT NULL,
+            max_attempts INTEGER DEFAULT 3 NOT NULL
         )
     """)
     conn.commit()
@@ -122,7 +123,7 @@ class LoginWindow(QWidget):
         password = self.password.text()
         conn = connect_db()
         cur = conn.cursor()
-        cur.execute("SELECT password, is_admin, is_blocked, failed_attempts FROM users WHERE username = %s",
+        cur.execute("SELECT password, is_admin, is_blocked, failed_attempts, max_attempts FROM users WHERE username = %s",
                     (username,))
         user = cur.fetchone()
 
@@ -133,23 +134,26 @@ class LoginWindow(QWidget):
             elif user[0] is None:  # Если пароль NULL, открываем окно создания пароля
                 self.open_create_password_window(username)
             elif bcrypt.checkpw(password.encode(), user[0].encode()):
+                # Сбрасываем счетчик попыток при успешном входе
                 cur.execute("UPDATE users SET failed_attempts = 0 WHERE username = %s", (username,))
                 conn.commit()
                 if user[1]:
-                    self.open_admin_panel()
+                    self.open_admin_panel(username)
                 else:
                     self.open_user_panel(username)
                 logging.info(f"User {username} logged in successfully")
             else:
+                # Увеличиваем счетчик неудачных попыток
                 failed_attempts = user[3] + 1
-                if failed_attempts >= 3:
+                max_attempts = user[4]
+                cur.execute("UPDATE users SET failed_attempts = %s WHERE username = %s",
+                            (failed_attempts, username))
+                if failed_attempts >= max_attempts and username != "ADMIN":
                     cur.execute("UPDATE users SET is_blocked = TRUE WHERE username = %s", (username,))
                     show_error("Too many failed attempts, user blocked!")
                     logging.warning(f"User {username} blocked after too many failed login attempts")
                 else:
-                    cur.execute("UPDATE users SET failed_attempts = %s WHERE username = %s",
-                                (failed_attempts, username))
-                    show_error("Invalid credentials!")
+                    show_error(f"Invalid credentials! Attempts left: {max_attempts - failed_attempts}")
                     logging.warning(f"Failed login attempt for user {username}")
                 conn.commit()
         else:
@@ -159,8 +163,8 @@ class LoginWindow(QWidget):
         cur.close()
         conn.close()
 
-    def open_admin_panel(self):
-        self.admin_window = AdminPanel()
+    def open_admin_panel(self, username):
+        self.admin_window = AdminPanel(username)
         self.admin_window.show()
         self.close()
 
@@ -226,9 +230,10 @@ class CreatePasswordWindow(QWidget):
 
 # Панель администратора
 class AdminPanel(QWidget):
-    def __init__(self):
+    def __init__(self, current_user):
         super().__init__()
-        self.setWindowTitle("Admin Panel")
+        self.current_user = current_user
+        self.setWindowTitle(f"Admin Panel - {self.current_user}")
         self.setGeometry(200, 200, 800, 600)
         layout = QHBoxLayout()
 
@@ -265,6 +270,10 @@ class AdminPanel(QWidget):
         self.remove_admin_btn.clicked.connect(self.remove_admin)
         action_layout.addWidget(self.remove_admin_btn)
 
+        self.set_attempts_btn = QPushButton("Set Max Attempts")
+        self.set_attempts_btn.clicked.connect(self.set_max_attempts)
+        action_layout.addWidget(self.set_attempts_btn)
+
         self.delete_user_btn = QPushButton("Delete User")
         self.delete_user_btn.clicked.connect(self.delete_user)
         action_layout.addWidget(self.delete_user_btn)
@@ -283,12 +292,14 @@ class AdminPanel(QWidget):
         self.user_list.clear()
         conn = connect_db()
         cur = conn.cursor()
-        cur.execute("SELECT username, is_blocked FROM users")
+        cur.execute("SELECT username, is_blocked, is_admin FROM users")
         users = cur.fetchall()
         for user in users:
             item = QListWidgetItem(user[0])
             if user[1]:  # Если пользователь заблокирован
                 item.setIcon(QIcon.fromTheme("dialog-error"))  # Красный крестик
+            elif user[2]:  # Если пользователь админ
+                item.setIcon(QIcon.fromTheme("emblem-default"))  # Зеленая галочка
             self.user_list.addItem(item)
         cur.close()
         conn.close()
@@ -306,11 +317,16 @@ class AdminPanel(QWidget):
                 return
             conn = connect_db()
             cur = conn.cursor()
-            cur.execute("INSERT INTO users (username, guid) VALUES (%s, %s)", (username, str(uuid.uuid4())))
+            cur.execute("SELECT * FROM users WHERE username = %s", (username,))
+            if cur.fetchone():
+                show_error(f"User '{username}' already exists!")
+                return
+            cur.execute("INSERT INTO users (username, guid, max_attempts) VALUES (%s, %s, %s)",
+                        (username, str(uuid.uuid4()), 3))  # По умолчанию max_attempts = 3
             conn.commit()
             cur.close()
             conn.close()
-            log_event(f"User {username} created by ADMIN")
+            log_event(f"User {username} created by {self.current_user}")
             self.refresh_users()
 
     def block_user(self):
@@ -322,11 +338,16 @@ class AdminPanel(QWidget):
                 return
             conn = connect_db()
             cur = conn.cursor()
+            cur.execute("SELECT is_admin FROM users WHERE username = %s", (username,))
+            is_admin = cur.fetchone()[0]
+            if is_admin:
+                show_error("Cannot block an admin user!")
+                return
             cur.execute("UPDATE users SET is_blocked = TRUE WHERE username = %s", (username,))
             conn.commit()
             cur.close()
             conn.close()
-            log_event(f"User {username} blocked by ADMIN")
+            log_event(f"User {username} blocked by {self.current_user}")
             self.refresh_users()
 
     def unblock_user(self):
@@ -339,7 +360,7 @@ class AdminPanel(QWidget):
             conn.commit()
             cur.close()
             conn.close()
-            log_event(f"User {username} unblocked by ADMIN")
+            log_event(f"User {username} unblocked by {self.current_user}")
             self.refresh_users()
 
     def reset_password(self):
@@ -352,10 +373,13 @@ class AdminPanel(QWidget):
             conn.commit()
             cur.close()
             conn.close()
-            log_event(f"Password reset for user {username} by ADMIN")
+            log_event(f"Password reset for user {username} by {self.current_user}")
             show_info(f"Password for {username} has been reset.")
 
     def set_admin(self):
+        if self.current_user != "ADMIN":
+            show_error("Only the main admin can grant admin rights!")
+            return
         user = self.user_list.currentItem()
         if user:
             username = user.text()
@@ -365,10 +389,13 @@ class AdminPanel(QWidget):
             conn.commit()
             cur.close()
             conn.close()
-            log_event(f"User {username} granted admin rights by ADMIN")
+            log_event(f"User {username} granted admin rights by {self.current_user}")
             self.refresh_users()
 
     def remove_admin(self):
+        if self.current_user != "ADMIN":
+            show_error("Only the main admin can remove admin rights!")
+            return
         user = self.user_list.currentItem()
         if user:
             username = user.text()
@@ -381,8 +408,26 @@ class AdminPanel(QWidget):
             conn.commit()
             cur.close()
             conn.close()
-            log_event(f"Admin rights removed for user {username} by ADMIN")
+            log_event(f"Admin rights removed for user {username} by {self.current_user}")
             self.refresh_users()
+
+    def set_max_attempts(self):
+        user = self.user_list.currentItem()
+        if user:
+            username = user.text()
+            if username == "ADMIN":
+                show_error("Cannot change max attempts for the main admin!")
+                return
+            attempts, ok = QInputDialog.getInt(self, "Set Max Attempts", "Enter maximum number of attempts:")
+            if ok:
+                conn = connect_db()
+                cur = conn.cursor()
+                cur.execute("UPDATE users SET max_attempts = %s WHERE username = %s", (attempts, username))
+                conn.commit()
+                cur.close()
+                conn.close()
+                log_event(f"Max attempts set to {attempts} for user {username} by {self.current_user}")
+                self.refresh_users()
 
     def delete_user(self):
         user = self.user_list.currentItem()
@@ -397,7 +442,7 @@ class AdminPanel(QWidget):
             conn.commit()
             cur.close()
             conn.close()
-            log_event(f"User {username} deleted by ADMIN")
+            log_event(f"User {username} deleted by {self.current_user}")
             self.refresh_users()
 
     def logout(self):
@@ -410,7 +455,7 @@ class UserPanel(QWidget):
     def __init__(self, username):
         super().__init__()
         self.username = username
-        self.setWindowTitle("User Panel")
+        self.setWindowTitle(f"User Panel - {self.username}")
         self.setGeometry(200, 200, 600, 400)
         layout = QHBoxLayout()
 
