@@ -3,11 +3,10 @@ import sys
 import bcrypt
 import psycopg2
 import logging
-import uuid
 import re
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-    QMessageBox, QListWidget, QGroupBox, QFormLayout, QInputDialog, QListWidgetItem
+    QMessageBox, QListWidget, QGroupBox, QFormLayout, QInputDialog, QListWidgetItem, QCheckBox
 )
 from PySide6.QtGui import QIcon
 
@@ -33,16 +32,39 @@ def validate_username(username):
         return False
     return True
 
-def validate_password(password):
+def validate_password(password, username):
+    conn = connect_db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT require_special_chars, require_uppercase, require_lowercase, require_digits 
+        FROM users WHERE username = %s
+    """, (username,))
+    restrictions = cur.fetchone()
+    cur.close()
+    conn.close()
+
+    # Если ограничения не заданы (все False), пароль может быть любым
+    if not restrictions or all(not restriction for restriction in restrictions):
+        return True, "Password is valid."
+
+    require_special_chars, require_uppercase, require_lowercase, require_digits = restrictions
+
     if len(password) < 8:
-        return False
-    if not re.search(r'[A-Z]', password):
-        return False
-    if not re.search(r'[a-z]', password):
-        return False
-    if not re.search(r'[0-9]', password):
-        return False
-    return True
+        return False, "Password must be at least 8 characters long."
+
+    if require_uppercase and not re.search(r'[A-Z]', password):
+        return False, "Password must contain at least one uppercase letter."
+
+    if require_lowercase and not re.search(r'[a-z]', password):
+        return False, "Password must contain at least one lowercase letter."
+
+    if require_digits and not re.search(r'[0-9]', password):
+        return False, "Password must contain at least one digit."
+
+    if require_special_chars and not re.search(r'[!@#$%^&*(),.?":{}|<>]', password):
+        return False, "Password must contain at least one special character."
+
+    return True, "Password is valid."
 
 def log_event(event):
     logging.info(event)
@@ -67,11 +89,12 @@ def show_info(message):
 def init_db():
     conn = connect_db()
     cur = conn.cursor()
+
+    # Создаем таблицу users с полным набором параметров
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id SERIAL PRIMARY KEY,
             username TEXT UNIQUE NOT NULL CHECK (LENGTH(username) >= 3 AND LENGTH(username) <= 32),
-            guid UUID UNIQUE NOT NULL,
             password TEXT,
             email TEXT,
             cn TEXT,
@@ -80,37 +103,53 @@ def init_db():
             is_admin BOOLEAN DEFAULT FALSE NOT NULL,
             is_blocked BOOLEAN DEFAULT FALSE NOT NULL,
             failed_attempts INTEGER DEFAULT 0 NOT NULL,
-            max_attempts INTEGER DEFAULT 3 NOT NULL
+            max_attempts INTEGER DEFAULT 3 NOT NULL,
+            require_special_chars BOOLEAN DEFAULT FALSE,
+            require_uppercase BOOLEAN DEFAULT FALSE,
+            require_lowercase BOOLEAN DEFAULT FALSE,
+            require_digits BOOLEAN DEFAULT FALSE
         )
     """)
-    conn.commit()
-    cur.execute("SELECT * FROM users WHERE username='ADMIN'")
+
+    # Добавляем колонки для ограничений пароля, если они не существуют
+    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS require_special_chars BOOLEAN DEFAULT FALSE;")
+    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS require_uppercase BOOLEAN DEFAULT TRUE;")
+    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS require_lowercase BOOLEAN DEFAULT TRUE;")
+    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS require_digits BOOLEAN DEFAULT TRUE;")
+
+    # Проверяем, существует ли пользователь ADMIN
+    cur.execute("SELECT * FROM users WHERE username = 'ADMIN'")
     if not cur.fetchone():
+        # Хэшируем пароль для ADMIN
         hashed_pw = bcrypt.hashpw(b"ADMIN", bcrypt.gensalt()).decode()
-        cur.execute("INSERT INTO users (username, guid, password, is_admin) VALUES (%s, %s, %s, TRUE)",
-                    ('ADMIN', str(uuid.uuid4()), hashed_pw))
+        # Создаем пользователя ADMIN
+        cur.execute("""
+            INSERT INTO users (username, password, is_admin) 
+            VALUES (%s, %s, %s)
+        """, ("ADMIN", hashed_pw, True))
         conn.commit()
+
+    conn.commit()
     cur.close()
     conn.close()
 
-# Класс окна авторизации
 class LoginWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Login")
-        self.setGeometry(100, 100, 400, 250)
+        self.setGeometry(300, 300, 300, 150)
         layout = QVBoxLayout()
 
         self.label = QLabel("Username:")
         layout.addWidget(self.label)
-        self.username = QLineEdit()
-        layout.addWidget(self.username)
+        self.username_input = QLineEdit()
+        layout.addWidget(self.username_input)
 
         self.label2 = QLabel("Password:")
         layout.addWidget(self.label2)
-        self.password = QLineEdit()
-        self.password.setEchoMode(QLineEdit.Password)
-        layout.addWidget(self.password)
+        self.password_input = QLineEdit()
+        self.password_input.setEchoMode(QLineEdit.Password)
+        layout.addWidget(self.password_input)
 
         self.login_btn = QPushButton("Login")
         self.login_btn.clicked.connect(self.handle_login)
@@ -119,42 +158,51 @@ class LoginWindow(QWidget):
         self.setLayout(layout)
 
     def handle_login(self):
-        username = self.username.text()
-        password = self.password.text()
+        username = self.username_input.text()
+        password = self.password_input.text()
+
+        if not validate_username(username):
+            show_error("Invalid username!")
+            return
+
         conn = connect_db()
         cur = conn.cursor()
-        cur.execute("SELECT password, is_admin, is_blocked, failed_attempts, max_attempts FROM users WHERE username = %s",
-                    (username,))
+        cur.execute("""
+            SELECT password, is_blocked, max_attempts, require_special_chars, require_uppercase, require_lowercase, require_digits 
+            FROM users WHERE username = %s
+        """, (username,))
         user = cur.fetchone()
 
         if user:
-            if user[2]:  # Если пользователь заблокирован
+            hashed_pw, is_blocked, max_attempts, require_special_chars, require_uppercase, require_lowercase, require_digits = user
+
+            if is_blocked:
                 show_error("User is blocked!")
-                logging.warning(f"Blocked user {username} attempted login")
-            elif user[0] is None:  # Если пароль NULL, открываем окно создания пароля
-                self.open_create_password_window(username)
-            elif bcrypt.checkpw(password.encode(), user[0].encode()):
-                # Сбрасываем счетчик попыток при успешном входе
-                cur.execute("UPDATE users SET failed_attempts = 0 WHERE username = %s", (username,))
-                conn.commit()
-                if user[1]:
+                return
+
+            # Если пароль не задан (NULL), перенаправляем на создание пароля
+            if hashed_pw is None:
+                self.create_password_window = CreatePasswordWindow(username)
+                self.create_password_window.show()
+                self.close()
+                return
+
+            # Проверяем пароль
+            if bcrypt.checkpw(password.encode(), hashed_pw.encode()):
+                if username == "ADMIN":
                     self.open_admin_panel(username)
                 else:
                     self.open_user_panel(username)
-                logging.info(f"User {username} logged in successfully")
             else:
-                # Увеличиваем счетчик неудачных попыток
-                failed_attempts = user[3] + 1
-                max_attempts = user[4]
-                cur.execute("UPDATE users SET failed_attempts = %s WHERE username = %s",
-                            (failed_attempts, username))
-                if failed_attempts >= max_attempts and username != "ADMIN":
+                failed_attempts = max_attempts - 1
+                if failed_attempts <= 0:
                     cur.execute("UPDATE users SET is_blocked = TRUE WHERE username = %s", (username,))
                     show_error("Too many failed attempts, user blocked!")
                     logging.warning(f"User {username} blocked after too many failed login attempts")
                 else:
-                    show_error(f"Invalid credentials! Attempts left: {max_attempts - failed_attempts}")
+                    show_error(f"Invalid credentials! Attempts left: {failed_attempts}")
                     logging.warning(f"Failed login attempt for user {username}")
+                cur.execute("UPDATE users SET max_attempts = %s WHERE username = %s", (failed_attempts, username))
                 conn.commit()
         else:
             show_error("Invalid credentials!")
@@ -173,11 +221,6 @@ class LoginWindow(QWidget):
         self.user_window.show()
         self.close()
 
-    def open_create_password_window(self, username):
-        self.create_password_window = CreatePasswordWindow(username)
-        self.create_password_window.show()
-
-# Окно создания пароля
 class CreatePasswordWindow(QWidget):
     def __init__(self, username):
         super().__init__()
@@ -212,10 +255,6 @@ class CreatePasswordWindow(QWidget):
             show_error("Passwords do not match!")
             return
 
-        if not validate_password(new_password):
-            show_error("Password must be at least 8 characters long and contain at least one uppercase letter, one lowercase letter, and one digit.")
-            return
-
         conn = connect_db()
         cur = conn.cursor()
         hashed_pw = bcrypt.hashpw(new_password.encode(), bcrypt.gensalt()).decode()
@@ -228,7 +267,6 @@ class CreatePasswordWindow(QWidget):
         show_info("Password created successfully!")
         self.close()
 
-# Панель администратора
 class AdminPanel(QWidget):
     def __init__(self, current_user):
         super().__init__()
@@ -273,6 +311,22 @@ class AdminPanel(QWidget):
         self.set_attempts_btn = QPushButton("Set Max Attempts")
         self.set_attempts_btn.clicked.connect(self.set_max_attempts)
         action_layout.addWidget(self.set_attempts_btn)
+
+        self.require_special_chars = QCheckBox("Require Special Characters")
+        action_layout.addWidget(self.require_special_chars)
+
+        self.require_uppercase = QCheckBox("Require Uppercase Letters")
+        action_layout.addWidget(self.require_uppercase)
+
+        self.require_lowercase = QCheckBox("Require Lowercase Letters")
+        action_layout.addWidget(self.require_lowercase)
+
+        self.require_digits = QCheckBox("Require Digits")
+        action_layout.addWidget(self.require_digits)
+
+        self.save_restrictions_btn = QPushButton("Save Password Restrictions")
+        self.save_restrictions_btn.clicked.connect(self.save_password_restrictions)
+        action_layout.addWidget(self.save_restrictions_btn)
 
         self.delete_user_btn = QPushButton("Delete User")
         self.delete_user_btn.clicked.connect(self.delete_user)
@@ -321,8 +375,8 @@ class AdminPanel(QWidget):
             if cur.fetchone():
                 show_error(f"User '{username}' already exists!")
                 return
-            cur.execute("INSERT INTO users (username, guid, max_attempts) VALUES (%s, %s, %s)",
-                        (username, str(uuid.uuid4()), 3))  # По умолчанию max_attempts = 3
+            cur.execute("INSERT INTO users (username, max_attempts) VALUES (%s, %s)",
+                        (username, 3))  # По умолчанию max_attempts = 3
             conn.commit()
             cur.close()
             conn.close()
@@ -429,6 +483,31 @@ class AdminPanel(QWidget):
                 log_event(f"Max attempts set to {attempts} for user {username} by {self.current_user}")
                 self.refresh_users()
 
+    def save_password_restrictions(self):
+        user = self.user_list.currentItem()
+        if user:
+            username = user.text()
+            special_chars = self.require_special_chars.isChecked()
+            uppercase = self.require_uppercase.isChecked()
+            lowercase = self.require_lowercase.isChecked()
+            digits = self.require_digits.isChecked()
+
+            conn = connect_db()
+            cur = conn.cursor()
+            cur.execute("""
+                UPDATE users 
+                SET require_special_chars = %s, 
+                    require_uppercase = %s, 
+                    require_lowercase = %s, 
+                    require_digits = %s 
+                WHERE username = %s
+            """, (special_chars, uppercase, lowercase, digits, username))
+            conn.commit()
+            cur.close()
+            conn.close()
+            log_event(f"Password restrictions updated for user {username} by {self.current_user}")
+            show_info("Password restrictions updated successfully!")
+
     def delete_user(self):
         user = self.user_list.currentItem()
         if user:
@@ -450,7 +529,6 @@ class AdminPanel(QWidget):
         self.login_window.show()
         self.close()
 
-# Панель пользователя
 class UserPanel(QWidget):
     def __init__(self, username):
         super().__init__()
@@ -543,7 +621,6 @@ class UserPanel(QWidget):
         self.login_window.show()
         self.close()
 
-# Окно смены пароля
 class ChangePasswordWindow(QWidget):
     def __init__(self, username):
         super().__init__()
@@ -585,8 +662,9 @@ class ChangePasswordWindow(QWidget):
             show_error("New passwords do not match!")
             return
 
-        if not validate_password(new_password):
-            show_error("Password must be at least 8 characters long and contain at least one uppercase letter, one lowercase letter, and one digit.")
+        is_valid, message = validate_password(new_password, self.username)
+        if not is_valid:
+            show_error(message)
             return
 
         conn = connect_db()
@@ -609,7 +687,6 @@ class ChangePasswordWindow(QWidget):
             cur.close()
             conn.close()
 
-# Окно деталей пользователя
 class UserDetailsWindow(QWidget):
     def __init__(self, username):
         super().__init__()
