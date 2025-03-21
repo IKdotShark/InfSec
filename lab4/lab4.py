@@ -156,6 +156,10 @@ def vigenere_cli():
         print("Ошибка: Неверный выбор алфавита!")
         return
 
+    print("\n----- Квадрат Виженера -----")
+    square = vigenere_square(alphabet)
+    print(square)
+
     original = read_file("Vinzher_volume_test.txt")
     if original is None or len(original) < 2000:
         print("Ошибка: Файл Vinzher_volume_test.txt не найден или содержит менее 2000 символов!")
