@@ -2,7 +2,6 @@ import os
 import sys
 import bcrypt
 import psycopg2
-import logging
 import re
 import time
 from PySide6.QtWidgets import (
@@ -12,11 +11,6 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QIcon
 from itertools import product
 import string
-
-# Настройка логирования
-LOG_FILE = os.path.expanduser("~/InfSec/var/log/lab3.log")
-os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)  # Создаем директорию, если её нет
-logging.basicConfig(filename=LOG_FILE, level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Конфигурация БД
 DB_CONFIG = {
@@ -68,9 +62,6 @@ def validate_password(password, username):
         return False, "Password must contain at least one special character."
 
     return True, "Password is valid."
-
-def log_event(event):
-    logging.info(event)
 
 def show_error(message):
     msg = QMessageBox()
@@ -448,7 +439,6 @@ class CreatePasswordWindow(QWidget):
         cur.close()
         conn.close()
 
-        log_event(f"User {self.username} created a password")
         show_info("Password created successfully!")
         self.close()
 
@@ -565,7 +555,6 @@ class AdminPanel(QWidget):
             conn.commit()
             cur.close()
             conn.close()
-            log_event(f"User {username} created by {self.current_user}")
             self.refresh_users()
 
     def block_user(self):
@@ -586,7 +575,6 @@ class AdminPanel(QWidget):
             conn.commit()
             cur.close()
             conn.close()
-            log_event(f"User {username} blocked by {self.current_user}")
             self.refresh_users()
 
     def unblock_user(self):
@@ -599,7 +587,6 @@ class AdminPanel(QWidget):
             conn.commit()
             cur.close()
             conn.close()
-            log_event(f"User {username} unblocked by {self.current_user}")
             self.refresh_users()
 
     def reset_password(self):
@@ -612,7 +599,6 @@ class AdminPanel(QWidget):
             conn.commit()
             cur.close()
             conn.close()
-            log_event(f"Password reset for user {username} by {self.current_user}")
             show_info(f"Password for {username} has been reset.")
 
     def set_admin(self):
@@ -628,7 +614,6 @@ class AdminPanel(QWidget):
             conn.commit()
             cur.close()
             conn.close()
-            log_event(f"User {username} granted admin rights by {self.current_user}")
             self.refresh_users()
 
     def remove_admin(self):
@@ -647,7 +632,6 @@ class AdminPanel(QWidget):
             conn.commit()
             cur.close()
             conn.close()
-            log_event(f"Admin rights removed for user {username} by {self.current_user}")
             self.refresh_users()
 
     def set_max_attempts(self):
@@ -665,7 +649,6 @@ class AdminPanel(QWidget):
                 conn.commit()
                 cur.close()
                 conn.close()
-                log_event(f"Max attempts set to {attempts} for user {username} by {self.current_user}")
                 self.refresh_users()
 
     def save_password_restrictions(self):
@@ -690,7 +673,6 @@ class AdminPanel(QWidget):
             conn.commit()
             cur.close()
             conn.close()
-            log_event(f"Password restrictions updated for user {username} by {self.current_user}")
             show_info("Password restrictions updated successfully!")
 
     def delete_user(self):
@@ -706,7 +688,6 @@ class AdminPanel(QWidget):
             conn.commit()
             cur.close()
             conn.close()
-            log_event(f"User {username} deleted by {self.current_user}")
             self.refresh_users()
 
     def logout(self):
@@ -794,7 +775,6 @@ class UserPanel(QWidget):
         cur.close()
         conn.close()
 
-        log_event(f"User {self.username} details updated")
         show_info("User details updated successfully!")
 
     def change_password(self):
@@ -864,7 +844,6 @@ class ChangePasswordWindow(QWidget):
             cur.close()
             conn.close()
 
-            log_event(f"User {self.username} changed their password")
             show_info("Password changed successfully!")
             self.close()
         else:
@@ -938,7 +917,6 @@ class UserDetailsWindow(QWidget):
         cur.close()
         conn.close()
 
-        log_event(f"User {self.username} details updated by ADMIN")
         show_info("User details updated successfully!")
         self.close()
 
