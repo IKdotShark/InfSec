@@ -175,6 +175,10 @@ class PasswordCrackerWindow(QWidget):
         self.lower_check = QCheckBox("Lowercase")
         brut_layout.addWidget(self.lower_check)
 
+        self.min_length_input = QLineEdit()
+        self.min_length_input.setPlaceholderText("Min password length")
+        brut_layout.addWidget(self.min_length_input)
+
         self.length_input = QLineEdit()
         self.length_input.setPlaceholderText("Max password length")
         brut_layout.addWidget(self.length_input)
@@ -212,17 +216,18 @@ class PasswordCrackerWindow(QWidget):
             QMessageBox.warning(self, "Error", "No characters selected for bruteforce!")
             return
 
+        min_length = int(self.min_length_input.text()) if self.min_length_input.text() else 1
         max_length = int(self.length_input.text())
-        self.brut_force(chars, max_length)
+        self.brut_force(chars, min_length, max_length)
 
-    def brut_force(self, chars, max_length):
+    def brut_force(self, chars, min_length, max_length):
         """
         Полный перебор паролей.
         """
         start_time = time.time()
         attempts = 0
 
-        for length in range(1, max_length + 1):
+        for length in range(min_length, max_length + 1):
             for attempt in product(chars, repeat=length):
                 password = ''.join(attempt)
                 attempts += 1
@@ -231,7 +236,7 @@ class PasswordCrackerWindow(QWidget):
                 elapsed_time = time.time() - start_time
                 speed = attempts / elapsed_time if elapsed_time > 0 else 0
                 self.speed_label.setText(f"Speed: {speed:.2f} attempts/sec")
-                self.progress_bar.setValue((length / max_length) * 100)
+                self.progress_bar.setValue(((length - min_length) / (max_length - min_length + 1)) * 100)
 
                 # Подставляем пароль в поле ввода и пытаемся войти
                 self.login_window.password_input.setText(password)
