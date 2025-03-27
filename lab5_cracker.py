@@ -1,4 +1,3 @@
-import os
 import sys
 import bcrypt
 import psycopg2
@@ -14,7 +13,7 @@ import string
 
 # Конфигурация БД
 DB_CONFIG = {
-    "dbname": "postgres",
+    "dbname": "Auth",
     "user": "postgres",
     "password": "postgres",
     "host": "localhost",
@@ -22,7 +21,10 @@ DB_CONFIG = {
 }
 
 def connect_db():
-    return psycopg2.connect(**DB_CONFIG)
+    conn = psycopg2.connect(**DB_CONFIG)
+    if hasattr(QApplication.instance(), 'active_window') and isinstance(QApplication.instance().active_window, LoginWindow):
+        QApplication.instance().active_window.register_db_connection(conn)
+    return conn
 
 def validate_username(username):
     if not re.match(r'^[a-zA-Z0-9_]{3,32}$', username):
@@ -33,8 +35,10 @@ def validate_password(password, username):
     conn = connect_db()
     cur = conn.cursor()
     cur.execute("""
-        SELECT require_special_chars, require_uppercase, require_lowercase, require_digits 
-        FROM users WHERE username = %s
+    SELECT require_special_chars, require_uppercase, 
+           require_lowercase, require_digits 
+    FROM users 
+    WHERE username = %s
     """, (username,))
     restrictions = cur.fetchone()
     cur.close()
@@ -81,51 +85,75 @@ def show_info(message):
 
 # Создание таблицы пользователей
 def init_db():
-    conn = connect_db()
-    cur = conn.cursor()
+    """
+    Инициализация базы данных: создание таблиц и начальных данных.
+    Автоматически закрывает соединения даже при возникновении ошибок.
+    """
+    conn = None
+    cur = None
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        cur = conn.cursor()
 
-    # Создаем таблицу users с полным набором параметров
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id SERIAL PRIMARY KEY,
-            username TEXT UNIQUE NOT NULL CHECK (LENGTH(username) >= 3 AND LENGTH(username) <= 32),
-            password TEXT,
-            email TEXT,
-            cn TEXT,
-            description TEXT,
-            phonenumber TEXT,
-            is_admin BOOLEAN DEFAULT FALSE NOT NULL,
-            is_blocked BOOLEAN DEFAULT FALSE NOT NULL,
-            failed_attempts INTEGER DEFAULT 0 NOT NULL,
-            max_attempts INTEGER DEFAULT 3 NOT NULL,
-            require_special_chars BOOLEAN DEFAULT FALSE,
-            require_uppercase BOOLEAN DEFAULT FALSE,
-            require_lowercase BOOLEAN DEFAULT FALSE,
-            require_digits BOOLEAN DEFAULT FALSE
-        )
-    """)
-
-    # Добавляем колонки для ограничений пароля, если они не существуют
-    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS require_special_chars BOOLEAN DEFAULT FALSE;")
-    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS require_uppercase BOOLEAN DEFAULT TRUE;")
-    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS require_lowercase BOOLEAN DEFAULT TRUE;")
-    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS require_digits BOOLEAN DEFAULT TRUE;")
-
-    # Проверяем, существует ли пользователь ADMIN
-    cur.execute("SELECT * FROM users WHERE username = 'ADMIN'")
-    if not cur.fetchone():
-        # Хэшируем пароль для ADMIN
-        hashed_pw = bcrypt.hashpw(b"ADMIN", bcrypt.gensalt()).decode()
-        # Создаем пользователя ADMIN
+        # Создаем таблицу users с полным набором параметров
         cur.execute("""
-            INSERT INTO users (username, password, is_admin) 
-            VALUES (%s, %s, %s)
-        """, ("ADMIN", hashed_pw, True))
+            CREATE TABLE IF NOT EXISTS users (
+                id SERIAL PRIMARY KEY,
+                username TEXT UNIQUE NOT NULL CHECK (LENGTH(username) >= 3 AND LENGTH(username) <= 32),
+                password TEXT,
+                email TEXT,
+                cn TEXT,
+                description TEXT,
+                phonenumber TEXT,
+                is_admin BOOLEAN DEFAULT FALSE NOT NULL,
+                is_blocked BOOLEAN DEFAULT FALSE NOT NULL,
+                failed_attempts INTEGER DEFAULT 0 NOT NULL,
+                max_attempts INTEGER DEFAULT 3 NOT NULL,
+                require_special_chars BOOLEAN DEFAULT FALSE,
+                require_uppercase BOOLEAN DEFAULT FALSE,
+                require_lowercase BOOLEAN DEFAULT FALSE,
+                require_digits BOOLEAN DEFAULT FALSE
+            )
+        """)
+
+        # Добавляем колонки для ограничений пароля, если они не существуют
+        cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS require_special_chars BOOLEAN DEFAULT FALSE;")
+        cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS require_uppercase BOOLEAN DEFAULT TRUE;")
+        cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS require_lowercase BOOLEAN DEFAULT TRUE;")
+        cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS require_digits BOOLEAN DEFAULT TRUE;")
+
+        # Проверяем, существует ли пользователь ADMIN
+        cur.execute("SELECT * FROM users WHERE username = 'ADMIN'")
+        if not cur.fetchone():
+            # Хэшируем пароль для ADMIN
+            hashed_pw = bcrypt.hashpw(b"ADMIN", bcrypt.gensalt()).decode()
+            # Создаем пользователя ADMIN
+            cur.execute("""
+                INSERT INTO users (username, password, is_admin) 
+                VALUES (%s, %s, %s)
+            """, ("ADMIN", hashed_pw, True))
+
         conn.commit()
 
-    conn.commit()
-    cur.close()
-    conn.close()
+    except Exception as e:
+        print(f"Error initializing database: {e}")
+        if conn:
+            conn.rollback()
+        raise  # Пробрасываем исключение дальше для обработки на уровне приложения
+
+    finally:
+        # Гарантированное закрытие ресурсов
+        if cur:
+            try:
+                cur.close()
+            except Exception as e:
+                print(f"Error closing cursor: {e}")
+
+        if conn and not conn.closed:
+            try:
+                conn.close()
+            except Exception as e:
+                print(f"Error closing connection: {e}")
 
 class PasswordCrackerWindow(QWidget):
     def __init__(self, login_window):
@@ -212,33 +240,41 @@ class PasswordCrackerWindow(QWidget):
         self.brut_force(chars, min_length, max_length)
 
     def brut_force(self, chars, min_length, max_length):
-        """
-        Полный перебор паролей.
-        """
         start_time = time.time()
         attempts = 0
+        found = False
 
         for length in range(min_length, max_length + 1):
             for attempt in product(chars, repeat=length):
+                if found:
+                    return
+
                 password = ''.join(attempt)
                 attempts += 1
 
-                # Обновляем прогресс и скорость
+                # Обновляем GUI
                 elapsed_time = time.time() - start_time
                 speed = attempts / elapsed_time if elapsed_time > 0 else 0
                 self.speed_label.setText(f"Speed: {speed:.2f} attempts/sec")
-                self.progress_bar.setValue(((length - min_length) / (max_length - min_length + 1)) * 100)
+                progress_value = int(((length - min_length) / (max_length - min_length + 1)) * 100)
+                self.progress_bar.setValue(progress_value)
 
-                # Подставляем пароль в поле ввода и пытаемся войти
+                # Пробуем войти
                 self.login_window.password_input.setText(password)
-                self.login_window.handle_login()
-
-                # Если вход успешен, завершаем перебор
-                if self.login_window.is_logged_in:
+                if self.login_window.handle_login():  # Если вход успешен
                     QMessageBox.information(self, "Success", f"Password found: {password}")
-                    return
+                    found = True
+                    return  # Выходим после успешного входа
 
-                QApplication.processEvents()  # Обновляем GUI
+                QApplication.processEvents()
+
+        if not found:
+            QMessageBox.information(
+                self,
+                "Brute-force completed",
+                f"Password not found with given parameters\n"
+                f"Total attempts: {attempts}"
+            )
 
     def start_dictionary_attack(self):
         """
@@ -249,9 +285,6 @@ class PasswordCrackerWindow(QWidget):
             self.dictionary_attack(file_name)
 
     def dictionary_attack(self, file_name):
-        """
-        Подбор пароля по словарю.
-        """
         try:
             with open(file_name, 'r', encoding='utf-8') as file:
                 dictionary = file.read().splitlines()
@@ -261,29 +294,36 @@ class PasswordCrackerWindow(QWidget):
 
         start_time = time.time()
         attempts = 0
+        found = False
 
         for word in dictionary:
-            attempts += 1
+            if found:
+                break
 
-            # Переводим слово в английскую раскладку (если оно на русском)
+            attempts += 1
             translated_word = self.translate_to_english_layout(word)
 
-            # Обновляем прогресс и скорость
+            # Обновляем GUI
             elapsed_time = time.time() - start_time
             speed = attempts / elapsed_time if elapsed_time > 0 else 0
             self.speed_label.setText(f"Speed: {speed:.2f} attempts/sec")
-            self.progress_bar.setValue((attempts / len(dictionary)) * 100)
+            self.progress_bar.setValue(int((attempts / len(dictionary)) * 100))
 
-            # Подставляем пароль в поле ввода и пытаемся войти
+            # Пробуем войти
             self.login_window.password_input.setText(translated_word)
-            self.login_window.handle_login()
-
-            # Если вход успешен, завершаем перебор
-            if self.login_window.is_logged_in:
+            if self.login_window.handle_login():  # Если вход успешен
                 QMessageBox.information(self, "Success", f"Password found: {translated_word}")
-                return
+            return  # Выходим после успешного входа
 
-            QApplication.processEvents()  # Обновляем GUI
+            QApplication.processEvents()
+
+        if not found:
+            QMessageBox.information(
+                self,
+                "Dictionary attack completed",
+                f"Password not found in dictionary\n"
+                f"Total attempts: {attempts}"
+            )
 
     def translate_to_english_layout(self, password):
         """
@@ -302,6 +342,11 @@ class PasswordCrackerWindow(QWidget):
             else:
                 translated_password += char
         return translated_password
+
+    def closeEvent(self, event):
+        if hasattr(self, 'login_window'):
+            self.login_window.close_all_db_connections()
+        event.accept()
 
 class LoginWindow(QWidget):
     def __init__(self):
@@ -329,8 +374,29 @@ class LoginWindow(QWidget):
 
         # Флаг для отслеживания успешного входа
         self.is_logged_in = False
-
+        self.login_attempts = 0
         self.setLayout(layout)
+        self.db_connections = []
+
+    def register_db_connection(self, conn):
+        """Регистрируем новое соединение для последующего закрытия"""
+        self.db_connections.append(conn)
+        return conn
+
+    def closeEvent(self, event):
+        """Переопределяем метод закрытия окна"""
+        self.close_all_db_connections()
+        event.accept()
+
+    def close_all_db_connections(self):
+        """Закрываем все зарегистрированные соединения с БД"""
+        for conn in self.db_connections:
+            try:
+                if conn and not conn.closed:
+                    conn.close()
+            except Exception as e:
+                print(f"Error closing DB connection: {e}")
+        self.db_connections.clear()
 
     def open_cracker(self):
         """
@@ -340,52 +406,58 @@ class LoginWindow(QWidget):
         self.cracker_window.show()
 
     def handle_login(self):
-        """
-        Обработка входа в систему.
-        """
         username = self.username_input.text()
         password = self.password_input.text()
 
         if not validate_username(username):
-            return
+            return False
 
-        conn = connect_db()
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT password, is_blocked, max_attempts, require_special_chars, require_uppercase, require_lowercase, require_digits 
-            FROM users WHERE username = %s
-        """, (username,))
-        user = cur.fetchone()
+        conn = None
+        cur = None
+        try:
+            conn = connect_db()
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT password, is_blocked, max_attempts 
+                FROM users 
+                WHERE username = %s
+            """, (username,))
+            user = cur.fetchone()
 
-        if user:
-            hashed_pw, is_blocked, max_attempts, require_special_chars, require_uppercase, require_lowercase, require_digits = user
+            if not user:
+                return False
+
+            hashed_pw, is_blocked, max_attempts = user
 
             if is_blocked:
-                return
+                show_error("Account is blocked!")
+                return False
 
-            # Если пароль не задан (NULL), перенаправляем на создание пароля
-            if hashed_pw is None:
-                return
-
-            # Проверяем пароль
             if bcrypt.checkpw(password.encode(), hashed_pw.encode()):
                 self.is_logged_in = True
+                self.login_attempts = 0
+
                 if username == "ADMIN":
                     self.open_admin_panel(username)
                 else:
                     self.open_user_panel(username)
+                return True
             else:
-                failed_attempts = max_attempts - 1
-                if failed_attempts <= 0:
+                self.login_attempts += 1
+                if self.login_attempts >= max_attempts:
                     cur.execute("UPDATE users SET is_blocked = TRUE WHERE username = %s", (username,))
-                else:
-                    cur.execute("UPDATE users SET max_attempts = %s WHERE username = %s", (failed_attempts, username))
-                conn.commit()
-        else:
-            return
+                    conn.commit()
+                    show_error("Too many failed attempts! Account blocked.")
+                return False
 
-        cur.close()
-        conn.close()
+        except Exception as e:
+            print(f"Database error: {e}")
+            return False
+        finally:
+            if cur:
+                cur.close()
+            if conn:
+                conn.close()
 
     def open_admin_panel(self, username):
         self.admin_window = AdminPanel(username)
@@ -438,7 +510,6 @@ class CreatePasswordWindow(QWidget):
         conn.commit()
         cur.close()
         conn.close()
-
         show_info("Password created successfully!")
         self.close()
 
@@ -695,6 +766,11 @@ class AdminPanel(QWidget):
         self.login_window.show()
         self.close()
 
+    def closeEvent(self, event):
+        if hasattr(self, 'login_window'):
+            self.login_window.close_all_db_connections()
+        event.accept()
+
 class UserPanel(QWidget):
     def __init__(self, username):
         super().__init__()
@@ -774,7 +850,6 @@ class UserPanel(QWidget):
         conn.commit()
         cur.close()
         conn.close()
-
         show_info("User details updated successfully!")
 
     def change_password(self):
@@ -785,6 +860,11 @@ class UserPanel(QWidget):
         self.login_window = LoginWindow()
         self.login_window.show()
         self.close()
+
+    def closeEvent(self, event):
+        if hasattr(self, 'login_window'):
+            self.login_window.close_all_db_connections()
+        event.accept()
 
 class ChangePasswordWindow(QWidget):
     def __init__(self, username):
@@ -843,7 +923,6 @@ class ChangePasswordWindow(QWidget):
             conn.commit()
             cur.close()
             conn.close()
-
             show_info("Password changed successfully!")
             self.close()
         else:
@@ -916,13 +995,18 @@ class UserDetailsWindow(QWidget):
         conn.commit()
         cur.close()
         conn.close()
-
         show_info("User details updated successfully!")
         self.close()
+
 
 if __name__ == "__main__":
     init_db()
     app = QApplication(sys.argv)
     window = LoginWindow()
+    app.active_window = window  # Сохраняем ссылку на главное окно
     window.show()
-    sys.exit(app.exec())
+    ret = app.exec()
+
+    # Гарантируем закрытие всех соединений при выходе
+    window.close_all_db_connections()
+    sys.exit(ret)

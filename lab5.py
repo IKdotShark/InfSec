@@ -1,6 +1,7 @@
 import sys
+import subprocess
 from PySide6.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QFormLayout, QComboBox
+    QApplication, QWidget, QVBoxLayout, QLabel, QLineEdit, QPushButton, QFormLayout, QComboBox
 )
 from sympy import Integer
 
@@ -128,9 +129,14 @@ class MainWindow(QWidget):
         if mode == "Password Checker":
             self.password_checker = PasswordCheckerWindow()
             self.password_checker.show()
-        else:
-            # Здесь можно добавить логику для режима Password Cracker
-            pass
+        elif mode == "Password Cracker":
+            try:
+                # Запускаем программу lab5_cracker.py
+                subprocess.Popen([sys.executable, "lab5_cracker.py"])
+            except FileNotFoundError:
+                print("Error: lab5_cracker.py not found")
+            except Exception as e:
+                print(f"Error launching lab5_cracker.py: {e}")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
