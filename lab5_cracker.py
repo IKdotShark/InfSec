@@ -1,3 +1,4 @@
+import os
 import sys
 import bcrypt
 import psycopg2
@@ -286,69 +287,71 @@ class PasswordCrackerWindow(QWidget):
 
     def dictionary_attack(self, file_name):
         try:
-            with open(file_name, 'r', encoding='utf-8') as file:
-                dictionary = [line.strip() for line in file if line.strip()]
+            # Получаем размер файла для прогресса
+            file_size = os.path.getsize(file_name)
+
+            with open(file_name, 'r', encoding='utf-8', errors='ignore') as file:
+                start_time = time.time()
+                attempts = 0
+                found = False
+
+                while True:
+                    # Читаем файл построчно вручную
+                    line = file.readline()
+                    if not line:  # Конец файла
+                        break
+
+                    if found:
+                        break
+
+                    word = line.strip()
+                    if not word:
+                        continue
+
+                    # Определяем язык слова
+                    has_russian = any(1024 <= ord(c) <= 1279 for c in word)  # Русские символы в Unicode
+
+                    if has_russian:
+                        password = self.translate_to_english_layout(word)
+                        variants = {password, password.lower(), password.upper()}
+                    else:
+                        variants = {word, word.lower(), word.upper()}
+
+                    for password in variants:
+                        if found:
+                            break
+
+                        attempts += 1
+
+                        # Обновляем интерфейс каждые 50 попыток
+                        if attempts % 50 == 0:
+                            elapsed_time = time.time() - start_time
+                            speed = attempts / max(elapsed_time, 0.001)
+                            self.speed_label.setText(f"Speed: {speed:.1f} attempts/sec")
+
+                            # Прогресс на основе позиции в файле
+                            progress = int((file.tell() / file_size) * 100)
+                            self.progress_bar.setValue(progress)
+                            QApplication.processEvents()
+
+                        # Пробуем войти
+                        self.login_window.password_input.setText(password)
+                        if self.login_window.handle_login():
+                            QMessageBox.information(self, "Success", f"Password found: {password}")
+                            found = True
+                            break
+
+                if not found:
+                    QMessageBox.information(
+                        self,
+                        "Dictionary attack",
+                        f"Password not found\nAttempts: {attempts}"
+                    )
+
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to read dictionary file: {e}")
-            return
-
-        start_time = time.time()
-        attempts = 0
-        found = False
-
-        for word in dictionary:
-            if found:
-                break
-
-            # Определяем язык слова (русский или английский)
-            is_russian = any(
-                cyrillic in word for cyrillic in 'абвгдеёжзийклмнопрстуфхцчшщъыьэюяАБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ')
-
-            if is_russian:
-                # Для русского слова пробуем только его английский вариант
-                password = self.translate_to_english_layout(word)
-                variants = [password]
-            else:
-                # Для английского слова пробуем как есть
-                variants = [word]
-
-            # Добавляем варианты регистра
-            variants += [v.lower() for v in variants] + [v.upper() for v in variants]
-            variants = list(set(variants))  # Удаляем дубликаты
-
-            for password in variants:
-                if found:
-                    break
-
-                attempts += 1
-
-                # Обновляем GUI
-                elapsed_time = time.time() - start_time
-                speed = attempts / elapsed_time if elapsed_time > 0 else 0
-                self.speed_label.setText(f"Speed: {speed:.2f} attempts/sec")
-                self.progress_bar.setValue(int((attempts / len(dictionary)) * 100))
-
-                # Пробуем войти
-                self.login_window.password_input.setText(password)
-                if self.login_window.handle_login():
-                    QMessageBox.information(self, "Success", f"Password found: {password}")
-                found = True
-                return
-
-                QApplication.processEvents()
-
-        if not found:
-            QMessageBox.information(
-                self,
-                "Dictionary attack completed",
-                f"Password not found in dictionary\n"
-                f"Total attempts: {attempts}"
-            )
+            QMessageBox.critical(self, "Error", f"Dictionary error: {str(e)}")
 
     def translate_to_english_layout(self, password):
-        """
-        Переводит пароль, набранный в русской раскладке, в английскую раскладку.
-        """
         russian_to_english = {
             'й': 'q', 'ц': 'w', 'у': 'e', 'к': 'r', 'е': 't', 'н': 'y',
             'г': 'u', 'ш': 'i', 'щ': 'o', 'з': 'p', 'х': '[', 'ъ': ']',
