@@ -287,7 +287,7 @@ class PasswordCrackerWindow(QWidget):
     def dictionary_attack(self, file_name):
         try:
             with open(file_name, 'r', encoding='utf-8') as file:
-                dictionary = file.read().splitlines()
+                dictionary = [line.strip() for line in file if line.strip()]
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to read dictionary file: {e}")
             return
@@ -300,22 +300,42 @@ class PasswordCrackerWindow(QWidget):
             if found:
                 break
 
-            attempts += 1
-            translated_word = self.translate_to_english_layout(word)
+            # Определяем язык слова (русский или английский)
+            is_russian = any(
+                cyrillic in word for cyrillic in 'абвгдеёжзийклмнопрстуфхцчшщъыьэюяАБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ')
 
-            # Обновляем GUI
-            elapsed_time = time.time() - start_time
-            speed = attempts / elapsed_time if elapsed_time > 0 else 0
-            self.speed_label.setText(f"Speed: {speed:.2f} attempts/sec")
-            self.progress_bar.setValue(int((attempts / len(dictionary)) * 100))
+            if is_russian:
+                # Для русского слова пробуем только его английский вариант
+                password = self.translate_to_english_layout(word)
+                variants = [password]
+            else:
+                # Для английского слова пробуем как есть
+                variants = [word]
 
-            # Пробуем войти
-            self.login_window.password_input.setText(translated_word)
-            if self.login_window.handle_login():  # Если вход успешен
-                QMessageBox.information(self, "Success", f"Password found: {translated_word}")
-            return  # Выходим после успешного входа
+            # Добавляем варианты регистра
+            variants += [v.lower() for v in variants] + [v.upper() for v in variants]
+            variants = list(set(variants))  # Удаляем дубликаты
 
-            QApplication.processEvents()
+            for password in variants:
+                if found:
+                    break
+
+                attempts += 1
+
+                # Обновляем GUI
+                elapsed_time = time.time() - start_time
+                speed = attempts / elapsed_time if elapsed_time > 0 else 0
+                self.speed_label.setText(f"Speed: {speed:.2f} attempts/sec")
+                self.progress_bar.setValue(int((attempts / len(dictionary)) * 100))
+
+                # Пробуем войти
+                self.login_window.password_input.setText(password)
+                if self.login_window.handle_login():
+                    QMessageBox.information(self, "Success", f"Password found: {password}")
+                found = True
+                return
+
+                QApplication.processEvents()
 
         if not found:
             QMessageBox.information(
@@ -329,19 +349,27 @@ class PasswordCrackerWindow(QWidget):
         """
         Переводит пароль, набранный в русской раскладке, в английскую раскладку.
         """
-        layout = {
-            'й': 'q', 'ц': 'w', 'у': 'e', 'к': 'r', 'е': 't', 'н': 'y', 'г': 'u', 'ш': 'i', 'щ': 'o', 'з': 'p',
-            'х': '[', 'ъ': ']', 'ф': 'a', 'ы': 's', 'в': 'd', 'а': 'f', 'п': 'g', 'р': 'h', 'о': 'j', 'л': 'k',
-            'д': 'l', 'ж': ';', 'э': "'", 'я': 'z', 'ч': 'x', 'с': 'c', 'м': 'v', 'и': 'b', 'т': 'n', 'ь': 'm',
-            'б': ',', 'ю': '.', 'ё': '`'
+        russian_to_english = {
+            'й': 'q', 'ц': 'w', 'у': 'e', 'к': 'r', 'е': 't', 'н': 'y',
+            'г': 'u', 'ш': 'i', 'щ': 'o', 'з': 'p', 'х': '[', 'ъ': ']',
+            'ф': 'a', 'ы': 's', 'в': 'd', 'а': 'f', 'п': 'g', 'р': 'h',
+            'о': 'j', 'л': 'k', 'д': 'l', 'ж': ';', 'э': "'", 'я': 'z',
+            'ч': 'x', 'с': 'c', 'м': 'v', 'и': 'b', 'т': 'n', 'ь': 'm',
+            'б': ',', 'ю': '.', 'ё': '`',
+            'Й': 'Q', 'Ц': 'W', 'У': 'E', 'К': 'R', 'Е': 'T', 'Н': 'Y',
+            'Г': 'U', 'Ш': 'I', 'Щ': 'O', 'З': 'P', 'Х': '{', 'Ъ': '}',
+            'Ф': 'A', 'Ы': 'S', 'В': 'D', 'А': 'F', 'П': 'G', 'Р': 'H',
+            'О': 'J', 'Л': 'K', 'Д': 'L', 'Ж': ':', 'Э': '"', 'Я': 'Z',
+            'Ч': 'X', 'С': 'C', 'М': 'V', 'И': 'B', 'Т': 'N', 'Ь': 'M',
+            'Б': '<', 'Ю': '>', 'Ё': '~'
         }
-        translated_password = ""
+        translated = []
         for char in password:
-            if char.lower() in layout:
-                translated_password += layout[char.lower()]
+            if char in russian_to_english:
+                translated.append(russian_to_english[char])
             else:
-                translated_password += char
-        return translated_password
+                translated.append(char)
+        return ''.join(translated)
 
     def closeEvent(self, event):
         if hasattr(self, 'login_window'):
@@ -406,10 +434,10 @@ class LoginWindow(QWidget):
         self.cracker_window.show()
 
     def handle_login(self):
-        username = self.username_input.text()
-        password = self.password_input.text()
+        username = self.username_input.text().strip()
+        password = self.password_input.text().strip()
 
-        if not validate_username(username):
+        if not username or not password:
             return False
 
         conn = None
@@ -433,10 +461,12 @@ class LoginWindow(QWidget):
                 show_error("Account is blocked!")
                 return False
 
-            if bcrypt.checkpw(password.encode(), hashed_pw.encode()):
+            # Проверяем пароль
+            if bcrypt.checkpw(password.encode('utf-8'), hashed_pw.encode('utf-8')):
                 self.is_logged_in = True
                 self.login_attempts = 0
 
+                # Открываем соответствующую панель
                 if username == "ADMIN":
                     self.open_admin_panel(username)
                 else:
